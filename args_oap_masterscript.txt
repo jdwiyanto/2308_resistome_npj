@@ -1,0 +1,90 @@
+# install singularity
+sudo apt-get update && \
+sudo apt-get install -y build-essential \
+libseccomp-dev pkg-config squashfs-tools cryptsetup
+
+sudo rm -r /usr/local/go
+
+export VERSION=1.13.15 OS=linux ARCH=amd64  # change this as you need
+
+wget -O /tmp/go${VERSION}.${OS}-${ARCH}.tar.gz https://dl.google.com/go/go${VERSION}.${OS}-${ARCH}.tar.gz && \
+sudo tar -C /usr/local -xzf /tmp/go${VERSION}.${OS}-${ARCH}.tar.gz
+
+echo 'export GOPATH=${HOME}/go' >> ~/.bashrc && \
+echo 'export PATH=/usr/local/go/bin:${PATH}:${GOPATH}/bin' >> ~/.bashrc && \
+source ~/.bashrc
+
+curl -sfL https://install.goreleaser.com/github.com/golangci/golangci-lint.sh |
+sh -s -- -b $(go env GOPATH)/bin v1.21.0
+
+mkdir -p ${GOPATH}/src/github.com/sylabs && \
+cd ${GOPATH}/src/github.com/sylabs && \
+git clone https://github.com/sylabs/singularity.git && \
+cd singularity
+
+git checkout v3.6.3
+
+cd ${GOPATH}/src/github.com/sylabs/singularity && \
+./mconfig && \
+cd ./builddir && \
+make && \
+sudo make install
+
+singularity version
+
+# get arg-oap SIF file
+wget --content-disposition https://ndownloader.figshare.com/files/25953791
+
+# clone arg-oap github
+git clone https://github.com/biofuture/Ublastx_stageone.git
+
+# run example data
+singularity exec -B /data/inputdir argoapv2.5.sif /home/argsoapv2.5/argoap_version2.5 -i inputdir/ -m meta-data.txt -o testoutdir -n 32
+
+# download all segamat shotgun data
+sudo aws s3 cp s3://amili-research/ARCHIVE/jdwiyanto/segamat_shotgun_raw/ ./segamat_input/ --recursive
+
+# revise file name to exclude B11MON, B05MON, and date
+for f in `ls`; do mv ${f} ${f/B05MON_/}; done
+for f in `ls`; do mv ${f} ${f/B11MON_/}; done
+for f in `ls`; do mv ${f} ${f/AML-MON-/}; done
+for f in `ls`; do mv ${f} ${f/201105/}; done
+
+# gunzip in parallel manner
+find *gz | xargs -P 32 -I {} gunzip {}
+
+# rename fastq to fq
+for f in `ls`; do mv ${f} ${f/fastq/fq}; done
+
+# convert fq to fa
+for f in `ls`; do seqtk seq -a $f > ${f/fq/fa}; done
+# remove fq file
+rm *fq
+
+# try running example data on fa file
+singularity exec -B /data/inputdir2 argoapv2.5.sif /home/argsoapv2.5/argoap_version2.5 -i inputdir2/ -m meta-data.txt -o testoutdir2 -n 32 -f fa
+
+# try in parallel conversion fq to fa in inputdir3
+ls *.fq | xargs -P 32 -I {} sh -c 'seqtk seq -a "$1" > "${1%.fq}.fa"' -- {}
+
+# remove fq file
+rm *fq
+
+# see if parallel conversion still works
+singularity exec -B /data/inputdir3 argoapv2.5.sif /home/argsoapv2.5/argoap_version2.5 -i inputdir3/ -m meta-data.txt -o testoutdir3 -n 32 -f fa
+
+# now convert segamat fq to fa, removing fq file as conversion completed
+ls *.fq | xargs -P 32 -I {} sh -c 'seqtk seq -a "$1" > "${1%.fq}.fa"; rm "$1"' -- {}
+
+# run segamat data
+singularity exec -B /data/segamat_input argoapv2.5.sif /home/argsoapv2.5/argoap_version2.5 -i segamat_input/ -m segamat_metadata.txt -o segamat_output -n 32 -f fa
+
+# 230519 memory issue, then found conda package for both stage1 and 2, trying out
+# https://github.com/xinehc/args_oap
+conda create -n args_oap -c bioconda -c conda-forge args_oap
+conda activate args_oap
+
+# run stage one and stage2 on segamat data
+args_oap stage_one -i segamat_input -o 230519_segamat_out -f fa -t 32
+args_oap stage_two -i 230519_segamat_out -t 32
+
